@@ -3,7 +3,8 @@
 //
 // The main tool-calling loop that:
 //   1. Loads/creates a session
-//   2. Builds the LLM context (system prompt + conversation history)
+//   2. Builds the LLM context (system prompt + long-term conversation
+//      memory from the messages table)
 //   3. Calls the LLM with tools
 //   4. Executes tool calls server-side
 //   5. Feeds results back to the LLM
@@ -30,6 +31,7 @@ import { aiRequestTimeoutMs } from '@/lib/ai/defaults';
 import { generateWithTools } from './providers';
 import { DENTAL_TOOLS, executeTool, type ToolExecutionContext } from './tools';
 import { buildDentalAgentPrompt } from './prompt';
+import { loadAgentMemory } from './memory';
 import {
   loadActiveSession,
   createSession,
@@ -43,6 +45,10 @@ import { formatCalendarLinksForWhatsApp } from '../calendar';
 
 /** Maximum tool-calling round trips per inbound message. */
 const MAX_ROUNDS = 6;
+
+/** Handoff reply when the LLM errors out or returns nothing usable. */
+const TECHNICAL_DIFFICULTIES_REPLY =
+  "I'm sorry, I'm having technical difficulties right now. Let me connect you with a staff member who can help you directly.";
 
 /**
  * Run one agent turn for an inbound message.
@@ -191,6 +197,10 @@ export async function runAgentTurn(
   // -------------------------------------------------------
   // 4. Build LLM messages
   // -------------------------------------------------------
+  // Context comes from the persisted conversation (messages table), not the
+  // short-lived session, so a patient returning days later isn't a stranger.
+  const memory = await loadAgentMemory(db, conversationId);
+
   const systemPrompt = buildDentalAgentPrompt({
     config,
     patientAppointments,
@@ -198,6 +208,7 @@ export async function runAgentTurn(
     patientName,
     nameIsPlaceholder,
     nameIsUnconfirmed: !!nameIsUnconfirmed,
+    conversationSummary: memory.summary,
   });
 
   // Start with the system message
@@ -205,8 +216,20 @@ export async function runAgentTurn(
     { role: 'system', content: systemPrompt },
   ];
 
-  // Add conversation history from session
-  for (const msg of session.messages) {
+  // The webhook persists the inbound message before dispatching to us, so it
+  // is normally already the last history entry. Drop it there and re-add it
+  // below so it appears exactly once, as the final user message.
+  // Demo mode doesn't persist agent replies to `messages`, and a failed
+  // history load returns nothing — use the session transcript in both cases.
+  const history = config.demo_mode || memory.history.length === 0
+    ? [...session.messages]
+    : [...memory.history];
+  const last = history[history.length - 1];
+  if (last?.role === 'user' && last.content.trim() === inboundText.trim()) {
+    history.pop();
+  }
+
+  for (const msg of history) {
     llmMessages.push({ role: msg.role, content: msg.content });
   }
 
@@ -312,7 +335,15 @@ export async function runAgentTurn(
     // LLM timeout or error → graceful handoff
     console.error('[dental agent] LLM error:', err);
     handedOff = true;
-    finalText = "I'm sorry, I'm having technical difficulties right now. Let me connect you with a staff member who can help you directly.";
+    finalText = TECHNICAL_DIFFICULTIES_REPLY;
+  }
+
+  // An empty model reply (seen with reasoning models) would otherwise leave
+  // the patient in silence — treat it like an LLM failure.
+  if (!handedOff && !finalText.trim() && !lastMutationAppointment) {
+    console.error('[dental agent] LLM returned an empty reply — handing off. conversation:', conversationId);
+    handedOff = true;
+    finalText = TECHNICAL_DIFFICULTIES_REPLY;
   }
 
   // -------------------------------------------------------
@@ -369,6 +400,7 @@ export async function runAgentTurn(
     consumed: true,
     reply: replyText,
     handedOff,
+    ai: { provider: aiConfig.provider, apiKey: aiConfig.apiKey, model: aiConfig.model },
   };
 }
 
