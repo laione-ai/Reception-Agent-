@@ -168,8 +168,8 @@ import type { ToolExecutionContext } from '../tools'
 // -------------------------------------------------------
 
 describe('DENTAL_TOOLS', () => {
-  it('defines exactly 7 tools', () => {
-    expect(DENTAL_TOOLS).toHaveLength(7)
+  it('defines exactly 8 tools', () => {
+    expect(DENTAL_TOOLS).toHaveLength(8)
   })
 
   it('all tools have name, description, and parameters', () => {
