@@ -172,6 +172,12 @@ function MessageContent({ message, t }: { message: Message, t: ReturnType<typeof
           ) : (
             <MediaUnavailable label={t("audio")} t={t} />
           )}
+          {/* Voice-note transcript (filled in by the webhook). */}
+          {message.content_text && (
+            <p className="mt-1 whitespace-pre-wrap break-words text-xs italic opacity-80">
+              {message.content_text}
+            </p>
+          )}
         </div>
       );
 

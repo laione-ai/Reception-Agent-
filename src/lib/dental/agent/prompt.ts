@@ -179,6 +179,14 @@ export function buildDentalAgentPrompt(ctx: PromptContext): string {
   );
 
   // -------------------------------------------------------
+  // Voice notes
+  // -------------------------------------------------------
+  parts.push(
+    'Messages starting with "[Voice note]" are automatic transcripts of a patient\'s voice note and may contain ' +
+    'transcription errors. Confirm names, dates, and times with the patient before booking, cancelling, or rescheduling.',
+  );
+
+  // -------------------------------------------------------
   // Prompt-injection defense (carried from defaults.ts)
   // -------------------------------------------------------
   parts.push(

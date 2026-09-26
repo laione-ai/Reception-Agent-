@@ -25,7 +25,7 @@ import {
 //      overridden in the settings form when this base URL points at OpenRouter.
 // This is acceptable for the single-operator pilot; revisit (build real P1-8)
 // before onboarding clients who need to choose their own provider.
-const OPENAI_URL =
+export const OPENAI_URL =
   process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1/chat/completions'
 
 interface OpenAiResponse {
