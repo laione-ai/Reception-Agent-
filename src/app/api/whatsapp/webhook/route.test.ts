@@ -220,6 +220,10 @@ vi.mock('@/lib/ai/auto-reply', () => ({
   dispatchInboundToAiReply: vi.fn(async () => {}),
 }))
 
+vi.mock('@/lib/ai/transcribe', () => ({
+  transcribeVoiceNote: vi.fn(async () => ({ status: 'skipped', reason: 'test default' })),
+}))
+
 vi.mock('@/lib/webhooks/deliver', () => ({
   dispatchWebhookEvent: vi.fn(async () => {}),
 }))
@@ -236,6 +240,9 @@ const templateWebhook = vi.hoisted(() => ({
 vi.mock('@/lib/whatsapp/template-webhook', () => templateWebhook)
 
 import { GET, POST } from './route'
+import { transcribeVoiceNote } from '@/lib/ai/transcribe'
+import { dispatchInboundToFlows } from '@/lib/flows/engine'
+import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
 
 const SECRET = process.env.META_APP_SECRET as string
 
@@ -951,5 +958,92 @@ describe('POST /api/whatsapp/webhook — status isolation between accounts (§4.
     // what used to reach into B's rows.
     expect(updates[0].filters).toEqual({ id__in: ['msg-A-row'] })
     expect(updates[0].filters).not.toHaveProperty('message_id')
+  })
+})
+
+describe('POST /api/whatsapp/webhook — voice notes', () => {
+  const transcribe = vi.mocked(transcribeVoiceNote)
+
+  function voiceNoteBody() {
+    const body = inboundMessageBody()
+    body.entry[0].changes[0].value.messages = [
+      {
+        id: 'wamid.VOICE',
+        from: '15551112222',
+        timestamp: '1700000000',
+        type: 'audio',
+        audio: { id: 'media-1', mime_type: 'audio/ogg; codecs=opus' },
+      } as never,
+    ]
+    return body
+  }
+
+  async function postVoiceNote() {
+    h.state.configs = [
+      {
+        id: 'cfg1',
+        account_id: 'acct-1',
+        user_id: 'user-1',
+        phone_number_id: 'PNID-1',
+        access_token: encrypt('ACCESS-TOKEN'),
+      },
+    ]
+    h.state.conversation = {
+      id: 'conv-1',
+      account_id: 'acct-1',
+      contact_id: 'contact-1',
+      unread_count: 0,
+    }
+    h.state.existingContact = { id: 'contact-1', name: 'Alice', account_id: 'acct-1' }
+    const raw = JSON.stringify(voiceNoteBody())
+    const res = await postRequest(raw, sign(raw))
+    expect(res.status).toBe(200)
+  }
+
+  it('stores the transcript as content_text and feeds it to the responders', async () => {
+    transcribe.mockResolvedValueOnce({ status: 'done', transcript: 'book me in tomorrow' })
+    await postVoiceNote()
+    await flushAfter()
+
+    expect(transcribe).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: 'acct-1', mediaId: 'media-1', accessToken: 'ACCESS-TOKEN' }),
+    )
+    const msgUpdates = h.calls.updates.messages ?? []
+    expect(msgUpdates).toHaveLength(1)
+    expect(msgUpdates[0].payload).toEqual({ content_text: 'book me in tomorrow' })
+    expect(msgUpdates[0].filters).toEqual({ conversation_id: 'conv-1', message_id: 'wamid.VOICE' })
+    expect(h.calls.updates.conversations?.[0].payload.last_message_text).toBe('book me in tomorrow')
+    expect(vi.mocked(dispatchInboundToFlows)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.objectContaining({ kind: 'text', text: 'book me in tomorrow' }),
+      }),
+    )
+    expect(vi.mocked(dispatchInboundToAiReply)).toHaveBeenCalled()
+  })
+
+  it('retries a failed transcription before giving up', async () => {
+    vi.useFakeTimers()
+    try {
+      transcribe
+        .mockResolvedValueOnce({ status: 'failed', error: 'timeout' })
+        .mockResolvedValueOnce({ status: 'done', transcript: 'second try' })
+      await postVoiceNote()
+      const done = flushAfter()
+      await vi.advanceTimersByTimeAsync(2000)
+      await done
+      expect(transcribe).toHaveBeenCalledTimes(2)
+      expect(h.calls.updates.messages?.[0].payload).toEqual({ content_text: 'second try' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('behaves as before when the note cannot be transcribed', async () => {
+    await postVoiceNote() // default mock: skipped
+    await flushAfter()
+    expect(transcribe).toHaveBeenCalledTimes(1)
+    expect(h.calls.updates.messages).toBeUndefined()
+    expect(h.calls.updates.conversations?.[0].payload.last_message_text).toBe('[audio]')
+    expect(vi.mocked(dispatchInboundToAiReply)).not.toHaveBeenCalled()
   })
 })

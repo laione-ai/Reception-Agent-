@@ -6,6 +6,7 @@ import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
+import { transcribeVoiceNote } from '@/lib/ai/transcribe'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 import {
   handleTemplateWebhookChange,
@@ -410,6 +411,40 @@ async function stampLastInboundAt(accountId: string): Promise<void> {
   }
 }
 
+const TRANSCRIBE_ATTEMPTS = 3
+
+/**
+ * Transcribe a voice note, retrying transient failures in-process. Safe to
+ * wait on: this runs inside the route's `after()`, which `next start`
+ * (Hostinger) always runs to completion. Returns null when the account
+ * can't transcribe, the note is silent, or every attempt failed.
+ */
+async function transcribeWithRetry(
+  accountId: string,
+  mediaId: string,
+  accessToken: string,
+): Promise<string | null> {
+  for (let attempt = 1; attempt <= TRANSCRIBE_ATTEMPTS; attempt++) {
+    const result = await transcribeVoiceNote({
+      db: supabaseAdmin(),
+      accountId,
+      mediaId,
+      accessToken,
+      timeoutMs: 20_000,
+    })
+    if (result.status === 'done') return result.transcript || null
+    if (result.status === 'skipped') return null
+    console.warn(
+      `[webhook] voice note ${mediaId} transcription attempt ${attempt} failed:`,
+      result.error,
+    )
+    if (attempt < TRANSCRIBE_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, attempt * 2000))
+    }
+  }
+  return null
+}
+
 /**
  * If an inbound message's sender is on a still-unreplied
  * broadcast_recipients row, flip it to `replied` so the reply count
@@ -670,11 +705,30 @@ async function processMessage(
   // propagated. Not awaited-for-correctness — the message is already saved.
   await stampLastInboundAt(accountId)
 
+  // Voice notes: transcribe so the responders, automations and inbox can
+  // treat what was said as text. The transcript lives in the audio row's
+  // content_text (always null for audio before this). A note that can't be
+  // transcribed behaves exactly as before — no text.
+  let transcript: string | null = null
+  if (message.type === 'audio' && message.audio?.id) {
+    transcript = await transcribeWithRetry(accountId, message.audio.id, accessToken)
+    if (transcript) {
+      const { error: transcriptErr } = await supabaseAdmin()
+        .from('messages')
+        .update({ content_text: transcript })
+        .eq('conversation_id', conversation.id)
+        .eq('message_id', message.id)
+      if (transcriptErr) {
+        console.error('[webhook] voice note transcript update failed:', transcriptErr)
+      }
+    }
+  }
+
   // Update conversation
   const { error: convError } = await supabaseAdmin()
     .from('conversations')
     .update({
-      last_message_text: contentText || `[${message.type}]`,
+      last_message_text: contentText || transcript || `[${message.type}]`,
       last_message_at: new Date().toISOString(),
       unread_count: (conversation.unread_count || 0) + 1,
       updated_at: new Date().toISOString(),
@@ -724,7 +778,7 @@ async function processMessage(
           }
         : {
             kind: 'text',
-            text: contentText ?? message.text?.body ?? '',
+            text: contentText ?? message.text?.body ?? transcript ?? '',
             meta_message_id: message.id,
           },
     isFirstInboundMessage,
@@ -752,7 +806,7 @@ async function processMessage(
     }
   }
 
-  const inboundText = contentText ?? message.text?.body ?? ''
+  const inboundText = contentText ?? message.text?.body ?? transcript ?? ''
 
   // ============================================================
   // Dental AI receptionist — free-text intent handling.
@@ -781,7 +835,7 @@ async function processMessage(
         conversationId: conversation.id,
         contactId: contactRecord.id,
         phone: message.from,
-        text: inboundText,
+        text: transcript ? `[Voice note] ${inboundText}` : inboundText,
         configOwnerUserId,
         waMessageId: message.id,
       })
@@ -871,7 +925,7 @@ async function processMessage(
     contact_id: contactRecord.id,
     whatsapp_message_id: message.id,
     content_type: contentType,
-    text: contentText,
+    text: contentText ?? transcript,
   })
 }
 
