@@ -79,10 +79,14 @@ export async function runAgentTurn(
     .order('full_name');
 
   // Resolve patient from phone — auto-register if this is a new caller
+  // Track whether the patient was just auto-registered in this call —
+  // their name came from WhatsApp profile and has NOT been confirmed.
+  let isNewlyAutoRegistered = false;
+
   const patient = await (async () => {
     const { data: existing } = await db
       .from('dental_patients')
-      .select('id, full_name')
+      .select('id, full_name, name_confirmed')
       .eq('account_id', accountId)
       .eq('phone', phone)
       .maybeSingle();
@@ -115,6 +119,7 @@ export async function runAgentTurn(
       return null;
     }
 
+    isNewlyAutoRegistered = true;
     console.log('[dental agent] auto-registered new patient:', created.id, patientName);
     return created;
   })();
@@ -128,6 +133,19 @@ export async function runAgentTurn(
   const nameIsPlaceholder = patientName
     ? /^\+?[\d\s\-()]+$/.test(patientName.trim())
     : false;
+
+  // Detect if the patient's name is unconfirmed — auto-pulled from
+  // WhatsApp profile (could be a nickname, joke name, family member's
+  // name, etc.). Treat as unconfirmed when:
+  //   1. The patient was just auto-registered in this call, OR
+  //   2. The patient record has never had their name explicitly confirmed
+  //      (name_confirmed column, if it exists, or no prior appointments)
+  // In either case, the prompt will ask the patient to confirm their name.
+  // NOTE: nameIsPlaceholder takes priority (bare phone number → different prompt).
+  const nameIsUnconfirmed = !nameIsPlaceholder && patientName && (
+    isNewlyAutoRegistered ||
+    (patient && 'name_confirmed' in patient && !(patient as Record<string, unknown>).name_confirmed)
+  );
 
   // Load patient's upcoming appointments
   let patientAppointments: DentalAppointment[] = [];
@@ -179,6 +197,7 @@ export async function runAgentTurn(
     doctors: doctors ?? [],
     patientName,
     nameIsPlaceholder,
+    nameIsUnconfirmed: !!nameIsUnconfirmed,
   });
 
   // Start with the system message

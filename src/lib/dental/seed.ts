@@ -62,34 +62,40 @@ export async function seedDentalData(
   // Ensure clinic config exists
   const config = await loadClinicConfig(db, accountId, userId);
 
-  // Create doctors
+  // Create doctors (check-then-insert by account_id + full_name to
+  // avoid duplicates on re-seed — the old onConflict: 'id' approach
+  // could never match because no id was provided in the payload).
   const doctorIds: string[] = [];
   for (const doc of DOCTORS) {
-    const { data, error } = await db
+    // Check if this doctor already exists for this account
+    const { data: existing } = await db
       .from('dental_doctors')
-      .upsert(
-        { account_id: accountId, user_id: userId, ...doc },
-        { onConflict: 'id' },
-      )
       .select('id')
-      .single();
+      .eq('account_id', accountId)
+      .eq('full_name', doc.full_name)
+      .maybeSingle();
 
-    if (error) {
-      // May already exist — try to find it
-      const { data: existing } = await db
+    if (existing) {
+      // Update the existing record to keep seed data fresh
+      await db
         .from('dental_doctors')
-        .select('id')
-        .eq('account_id', accountId)
-        .eq('full_name', doc.full_name)
-        .maybeSingle();
-
-      if (existing) {
-        doctorIds.push(existing.id);
-      } else {
-        console.error('[dental:seed] doctor insert failed:', error);
-      }
+        .update({ ...doc, user_id: userId, updated_at: new Date().toISOString() })
+        .eq('id', existing.id)
+        .eq('account_id', accountId);
+      doctorIds.push(existing.id);
     } else {
-      doctorIds.push(data.id);
+      // Insert a new doctor
+      const { data, error } = await db
+        .from('dental_doctors')
+        .insert({ account_id: accountId, user_id: userId, ...doc })
+        .select('id')
+        .single();
+
+      if (error) {
+        console.error('[dental:seed] doctor insert failed:', error);
+      } else {
+        doctorIds.push(data.id);
+      }
     }
   }
 

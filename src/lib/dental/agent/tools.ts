@@ -587,10 +587,11 @@ export async function executeTool(
           return errorResult(toolCall, 'No patient record found to update.');
         }
 
-        // Update the dental_patients record
+        // Update the dental_patients record — mark name as confirmed since
+        // the patient explicitly provided it (not auto-pulled from WhatsApp).
         const { error: updateErr } = await db
           .from('dental_patients')
-          .update({ full_name: fullName, updated_at: new Date().toISOString() })
+          .update({ full_name: fullName, name_confirmed: true, updated_at: new Date().toISOString() })
           .eq('id', patientId)
           .eq('account_id', accountId);
 

@@ -770,12 +770,13 @@ async function processMessage(
   // auto-reply — the dental agent is the sole responder.
   // ============================================================
   let dentalAgentConsumed = false
+  let isDentalAccount = false
   if (!flowConsumed && !dentalConsumed && !interactiveReplyId && inboundText.trim()) {
     try {
       const { dispatchInboundToDentalAgent } = await import(
         '@/lib/dental/agent/dispatch'
       )
-      dentalAgentConsumed = await dispatchInboundToDentalAgent({
+      const dentalResult = await dispatchInboundToDentalAgent({
         accountId,
         conversationId: conversation.id,
         contactId: contactRecord.id,
@@ -784,6 +785,8 @@ async function processMessage(
         configOwnerUserId,
         waMessageId: message.id,
       })
+      dentalAgentConsumed = dentalResult.consumed
+      isDentalAccount = dentalResult.isDentalAccount
     } catch (err) {
       console.error('[dental agent] dispatch failed:', err)
     }
@@ -841,7 +844,13 @@ async function processMessage(
   // the account has enabled it. Awaited inside `after()` (same reason as
   // the webhook dispatch below); `dispatchInboundToAiReply` owns its
   // eligibility gates + try/catch and never throws.
-  if (!flowConsumed && !dentalAgentConsumed && !interactiveReplyId && inboundText.trim()) {
+  //
+  // IMPORTANT: When isDentalAccount is true the generic AI is suppressed
+  // even if the dental agent failed to consume the message — a dental
+  // account must never fall through to the fully-generic assistant that
+  // has no clinic context. The patient gets silence (or a human picks up)
+  // rather than an un-scoped LLM answering on the clinic's behalf.
+  if (!flowConsumed && !dentalAgentConsumed && !isDentalAccount && !interactiveReplyId && inboundText.trim()) {
     await dispatchInboundToAiReply({
       accountId,
       conversationId: conversation.id,

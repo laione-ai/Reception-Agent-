@@ -94,6 +94,8 @@ export interface DentalPatient {
   user_id: string;
   contact_id: string | null;
   full_name: string;
+  /** True when the patient has explicitly confirmed their name (not auto-pulled). */
+  name_confirmed: boolean;
   phone: string;
   email: string | null;
   date_of_birth: string | null;
@@ -296,7 +298,7 @@ export const VALID_STATUS_TRANSITIONS: Record<
   DentalAppointmentStatus,
   DentalAppointmentStatus[]
 > = {
-  scheduled: ['reminder_sent', 'confirmed', 'cancelled', 'completed'],
+  scheduled: ['reminder_sent', 'confirmed', 'cancelled', 'reschedule_requested', 'completed'],
   reminder_sent: ['confirmed', 'cancelled', 'reschedule_requested', 'completed', 'no_show'],
   confirmed: ['cancelled', 'reschedule_requested', 'completed', 'no_show'],
   cancelled: [],

@@ -20,6 +20,8 @@ interface PromptContext {
   patientName?: string;
   /** True when the patient's name on file is just their phone number (new patient). */
   nameIsPlaceholder?: boolean;
+  /** True when this is the patient's very first interaction (name needs confirmation). */
+  nameIsUnconfirmed?: boolean;
 }
 
 /**
@@ -32,7 +34,7 @@ interface PromptContext {
  *   3. Anti-hallucination clause (appointments, times, providers)
  */
 export function buildDentalAgentPrompt(ctx: PromptContext): string {
-  const { config, patientAppointments, doctors, patientName, nameIsPlaceholder } = ctx;
+  const { config, patientAppointments, doctors, patientName, nameIsPlaceholder, nameIsUnconfirmed } = ctx;
   const parts: string[] = [];
 
   // -------------------------------------------------------
@@ -75,6 +77,13 @@ export function buildDentalAgentPrompt(ctx: PromptContext): string {
         `IMPORTANT: Before doing anything else, greet them warmly and ask for their full name. ` +
         `Once they provide it, immediately call update_patient_name with their name before proceeding with their request.`,
       );
+    } else if (nameIsUnconfirmed) {
+      parts.push(
+        `You are speaking with a patient whose name on file is "${patientName}" — however this was auto-pulled from their ` +
+        `WhatsApp profile and has NOT been confirmed. On your first interaction with them, politely confirm whether ` +
+        `"${patientName}" is their real full name. If they correct it, immediately call update_patient_name with the ` +
+        `corrected name before proceeding.`,
+      );
     } else {
       parts.push(`You are speaking with: ${patientName}`);
     }
@@ -98,6 +107,19 @@ export function buildDentalAgentPrompt(ctx: PromptContext): string {
   }
 
   // -------------------------------------------------------
+  // Stay on topic — refuse off-topic questions
+  // -------------------------------------------------------
+  parts.push(
+    'STAY ON TOPIC: You only handle matters related to dental appointments at ' +
+    `${config.clinic_name} — booking, cancelling, rescheduling, and basic clinic ` +
+    'information (hours, address, services, insurance). If the patient asks about ' +
+    'anything else (general knowledge questions, medical advice outside dentistry, ' +
+    'jokes, recipes, coding, etc.), do NOT answer it. Politely decline and redirect: ' +
+    '"I\'m only able to help with appointment bookings and clinic information for ' +
+    `${config.clinic_name}. Is there anything I can help you with regarding your dental appointment?"`,
+  );
+
+  // -------------------------------------------------------
   // Tool usage instructions
   // -------------------------------------------------------
   parts.push(
@@ -105,6 +127,10 @@ export function buildDentalAgentPrompt(ctx: PromptContext): string {
     'ALWAYS use tools to get real data — never state availability, times, or provider information from memory. ' +
     'Call get_provider_availability to check real availability before suggesting any time slots to the patient. ' +
     'Call get_my_appointments to see the patient\'s appointments before acting on cancel/reschedule requests.\n\n' +
+    'CRITICAL — PROVIDER ID RESOLUTION: You MUST always call list_providers FIRST to get real, current ' +
+    'provider IDs before calling get_provider_availability — even when the patient names a specific doctor. ' +
+    'Never guess or reuse a doctor_id from memory or a previous conversation. The IDs in the provider list ' +
+    'above are for display only; always get fresh IDs from list_providers before any availability check.\n\n' +
     'IMPORTANT: When the patient confirms a slot you previously offered (e.g. says "Yes", "book it", or ' +
     '"the second one"), and you no longer have the exact ISO datetime from the earlier tool result in your ' +
     'context, call get_provider_availability AGAIN with the same doctor and date range to re-fetch the precise ' +
@@ -112,12 +138,13 @@ export function buildDentalAgentPrompt(ctx: PromptContext): string {
     'cheap, fast, and also re-validates that the slot is still open. Never hand off a conversation solely ' +
     'because you lost track of a previously-offered time.\n\n' +
     'When booking:\n' +
-    '0. If the patient\'s name is not on file (flagged above), ask for their full name FIRST and call update_patient_name before proceeding\n' +
+    '0. If the patient\'s name is not on file or unconfirmed (flagged above), ask for their full name FIRST and call update_patient_name before proceeding\n' +
     '1. Ask what they need (treatment type / reason for visit)\n' +
     '2. Ask if they have a provider preference (or offer the list)\n' +
-    '3. Check real availability using get_provider_availability\n' +
-    '4. Present available options and let the patient choose\n' +
-    '5. Confirm the details with the patient BEFORE calling create_booking\n\n' +
+    '3. Call list_providers to get the real provider ID\n' +
+    '4. Check real availability using get_provider_availability with that ID\n' +
+    '5. Present available options and let the patient choose\n' +
+    '6. Confirm the details with the patient BEFORE calling create_booking\n\n' +
     'When cancelling:\n' +
     '1. Call get_my_appointments to find their appointment(s)\n' +
     '2. If multiple, ask which one they want to cancel\n' +
@@ -125,7 +152,7 @@ export function buildDentalAgentPrompt(ctx: PromptContext): string {
     'When rescheduling:\n' +
     '1. Call get_my_appointments to identify the appointment\n' +
     '2. Default to the SAME provider — only switch if the patient explicitly asks\n' +
-    '3. Check availability for that provider using get_provider_availability\n' +
+    '3. Call list_providers to get the real provider ID, then check availability using get_provider_availability\n' +
     '4. Present options and confirm BEFORE calling reschedule_booking\n' +
     '5. If the desired slot is taken, apologize and offer alternatives',
   );

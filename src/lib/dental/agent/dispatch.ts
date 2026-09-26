@@ -10,8 +10,11 @@
 // agent enabled. Non-dental accounts pay only one indexed
 // maybeSingle() query.
 //
-// Returns true if the message was consumed (suppresses automations
-// and generic AI auto-reply), false otherwise.
+// Returns a result indicating whether the message was consumed and
+// whether the account is a dental-enabled account. When isDentalAccount
+// is true, the generic AI auto-reply MUST be suppressed — even if
+// consumed is false (error/rate-limit) — to prevent an un-scoped
+// generic assistant from answering on behalf of the clinic.
 // ============================================================
 
 import { supabaseAdmin } from '@/lib/ai/admin-client';
@@ -30,16 +33,30 @@ export interface DispatchArgs {
   waMessageId?: string;
 }
 
+export interface DispatchResult {
+  /** True when the dental agent fully handled the message (sent a reply or handed off). */
+  consumed: boolean;
+  /** True when the account has the dental agent feature enabled.
+   *  When true, the generic AI auto-reply MUST be suppressed — even on failure. */
+  isDentalAccount: boolean;
+}
+
 /**
  * Entry point for the dental AI receptionist.
  *
  * Cheap early-exit pattern: one indexed query on dental_clinic_config.
- * If agent_enabled is false (or no row), returns false immediately.
+ * If agent_enabled is false (or no row), returns { consumed: false, isDentalAccount: false }.
  * Non-dental tenants pay ~1ms for this check.
+ *
+ * IMPORTANT: When isDentalAccount is true, the caller must suppress the
+ * generic AI auto-reply even when consumed is false. A dental account should
+ * never fall through to the fully-generic assistant — if the dental agent
+ * fails, the patient should get a safe static reply or silence, not an
+ * un-scoped LLM that knows nothing about the clinic.
  */
 export async function dispatchInboundToDentalAgent(
   args: DispatchArgs,
-): Promise<boolean> {
+): Promise<DispatchResult> {
   const {
     accountId,
     conversationId,
@@ -51,7 +68,7 @@ export async function dispatchInboundToDentalAgent(
   } = args;
 
   // Don't process empty messages
-  if (!text.trim()) return false;
+  if (!text.trim()) return { consumed: false, isDentalAccount: false };
 
   const db = supabaseAdmin();
 
@@ -64,7 +81,11 @@ export async function dispatchInboundToDentalAgent(
     .eq('account_id', accountId)
     .maybeSingle();
 
-  if (!config?.agent_enabled) return false;
+  if (!config?.agent_enabled) return { consumed: false, isDentalAccount: false };
+
+  // From here on, this IS a dental-enabled account — any failure must
+  // NOT fall through to the generic AI. Set isDentalAccount: true on
+  // every return path below.
 
   // -------------------------------------------------------
   // 2. Rate limit check (per-account)
@@ -78,7 +99,7 @@ export async function dispatchInboundToDentalAgent(
     console.warn(
       `[dental agent] account ${accountId} hit rate limit — skipping this inbound`,
     );
-    return false;
+    return { consumed: false, isDentalAccount: true };
   }
 
   // -------------------------------------------------------
@@ -100,7 +121,7 @@ export async function dispatchInboundToDentalAgent(
       waMessageId ?? `unknown_${Date.now()}`,
     );
 
-    if (!result.consumed) return false;
+    if (!result.consumed) return { consumed: false, isDentalAccount: true };
 
     // -------------------------------------------------------
     // 4. Send the reply via WhatsApp
@@ -136,12 +157,12 @@ export async function dispatchInboundToDentalAgent(
       });
     }
 
-    return true;
+    return { consumed: true, isDentalAccount: true };
   } catch (err) {
     // The dispatch must NEVER throw — same contract as the flow runner
     // and AI auto-reply. A failing agent must not break the webhook's
     // 200 response to Meta.
     console.error('[dental agent] dispatch failed:', err);
-    return false;
+    return { consumed: false, isDentalAccount: true };
   }
 }
