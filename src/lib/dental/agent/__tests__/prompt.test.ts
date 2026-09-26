@@ -142,4 +142,27 @@ describe('buildDentalAgentPrompt', () => {
     })
     expect(prompt).toContain('transfer_to_human')
   })
+
+  it('includes the earlier-conversation summary when given', () => {
+    const prompt = buildDentalAgentPrompt({
+      config: mockConfig,
+      patientAppointments: [],
+      doctors: [],
+      conversationSummary: 'Patient prefers morning slots with Dr. Smith.',
+    })
+    expect(prompt).toContain('Summary of earlier conversation with this patient')
+    expect(prompt).toContain('Patient prefers morning slots with Dr. Smith.')
+  })
+
+  it('omits the summary section when there is no summary', () => {
+    for (const conversationSummary of [undefined, null, '  ']) {
+      const prompt = buildDentalAgentPrompt({
+        config: mockConfig,
+        patientAppointments: [],
+        doctors: [],
+        conversationSummary,
+      })
+      expect(prompt).not.toContain('Summary of earlier conversation')
+    }
+  })
 })

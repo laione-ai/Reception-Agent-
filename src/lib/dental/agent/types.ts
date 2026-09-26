@@ -5,7 +5,7 @@
 // loop, session management, and provider integration.
 // ============================================================
 
-import type { AiUsage, ChatMessage } from '@/lib/ai/types';
+import type { AiProvider, AiUsage, ChatMessage } from '@/lib/ai/types';
 
 // -------------------------------------------------------
 // Tool definitions
@@ -86,6 +86,8 @@ export interface AgentTurnResult {
   reply?: string;
   /** Whether the conversation was handed off to a human. */
   handedOff?: boolean;
+  /** AI credentials used for this turn (reused for the post-reply summary refresh). */
+  ai?: { provider: AiProvider; apiKey: string; model: string };
 }
 
 // Re-export for convenience
