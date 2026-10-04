@@ -518,9 +518,9 @@ async function handleReaction(
   message: WhatsAppMessage,
   conversationId: string,
   contactId: string
-) {
+): Promise<{ changed: boolean; targetInternalId: string | null }> {
   const reaction = message.reaction
-  if (!reaction?.message_id) return
+  if (!reaction?.message_id) return { changed: false, targetInternalId: null }
 
   const targetInternalId = await lookupInternalIdByMetaId(
     reaction.message_id,
@@ -531,7 +531,7 @@ async function handleReaction(
       '[webhook] reaction target message not found; skipping',
       reaction.message_id
     )
-    return
+    return { changed: false, targetInternalId: null }
   }
 
   // Empty emoji = removal (per Meta's Cloud API spec).
@@ -545,8 +545,23 @@ async function handleReaction(
     if (delError) {
       console.error('[webhook] reaction delete failed:', delError.message)
     }
-    return
+    // Removal is a change, but the empty-emoji check in the caller
+    // prevents this from triggering a dental agent turn.
+    return { changed: true, targetInternalId }
   }
+
+  // Check if this exact emoji already exists (idempotency — a duplicate
+  // webhook delivery of the same reaction should not trigger a second
+  // agent turn). Section 4.5 of the build prompt.
+  const { data: existingReaction } = await supabaseAdmin()
+    .from('message_reactions')
+    .select('emoji')
+    .eq('message_id', targetInternalId)
+    .eq('actor_type', 'customer')
+    .eq('actor_id', contactId)
+    .maybeSingle()
+
+  const changed = !existingReaction || existingReaction.emoji !== reaction.emoji
 
   const { error: upsertError } = await supabaseAdmin()
     .from('message_reactions')
@@ -563,6 +578,8 @@ async function handleReaction(
   if (upsertError) {
     console.error('[webhook] reaction upsert failed:', upsertError.message)
   }
+
+  return { changed, targetInternalId }
 }
 
 async function processMessage(
@@ -615,7 +632,89 @@ async function processMessage(
   // into `messages`, never bump unread_count, never update last_message_text.
   // Done before parseMessageContent so the media-URL fetch is skipped.
   if (message.type === 'reaction') {
-    await handleReaction(message, conversation.id, contactRecord.id)
+    const reactionResult = await handleReaction(message, conversation.id, contactRecord.id)
+
+    // ============================================================
+    // Dental AI receptionist — reaction routing (Section 4.3).
+    //
+    // When a patient reacts to a message the agent sent (e.g. 👍 on
+    // "Shall I book it?"), route it into the dental agent as a new
+    // turn — but ONLY when ALL four gating conditions hold. This is
+    // additive to the general inbox's reaction handling above, which
+    // always runs unchanged for every tenant.
+    //
+    // Conditions:
+    //   1. dental_clinic_config.agent_enabled = true
+    //   2. reaction.emoji is non-empty (removal → no turn)
+    //   3. Target message was sent by the dental agent (sender_type='bot')
+    //   4. Active dental_agent_sessions row in 'collecting_info' or
+    //      'confirming' state
+    //
+    // Idempotency: handleReaction's `changed` flag ensures a duplicate
+    // webhook delivery (same emoji on same message) is a no-op here.
+    // The engine's waMessageId idempotency provides a secondary check.
+    // ============================================================
+    const emoji = message.reaction?.emoji
+    if (reactionResult.changed && reactionResult.targetInternalId && emoji) {
+      try {
+        // 1. Check agent_enabled
+        const { data: dentalConfig } = await supabaseAdmin()
+          .from('dental_clinic_config')
+          .select('agent_enabled')
+          .eq('account_id', accountId)
+          .maybeSingle()
+
+        if (dentalConfig?.agent_enabled) {
+          // 2. Check target message was sent by the dental agent
+          const { data: targetMsg } = await supabaseAdmin()
+            .from('messages')
+            .select('sender_type, content_text')
+            .eq('id', reactionResult.targetInternalId)
+            .single()
+
+          if (targetMsg?.sender_type === 'bot') {
+            // 3. Check active session in conversational state
+            const { loadActiveSession } = await import(
+              '@/lib/dental/agent/session'
+            )
+            const session = await loadActiveSession(
+              supabaseAdmin(),
+              accountId,
+              message.from
+            )
+
+            if (
+              session &&
+              (session.state === 'collecting_info' ||
+                session.state === 'confirming')
+            ) {
+              // All 4 conditions met — route reaction to dental agent
+              const { dispatchInboundToDentalAgent } = await import(
+                '@/lib/dental/agent/dispatch'
+              )
+
+              const reactionText =
+                `The patient reacted with ${emoji} to your message: ` +
+                `"${targetMsg.content_text ?? '[message]'}"`
+
+              await dispatchInboundToDentalAgent({
+                accountId,
+                conversationId: conversation.id,
+                contactId: contactRecord.id,
+                phone: message.from,
+                text: reactionText,
+                configOwnerUserId,
+                waMessageId: `reaction_${message.reaction!.message_id}_${emoji}`,
+              })
+            }
+          }
+        }
+      } catch (err) {
+        // Reaction dispatch must never fail the webhook — best effort
+        console.error('[dental] reaction agent dispatch failed:', err)
+      }
+    }
+
     return
   }
 

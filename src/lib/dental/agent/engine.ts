@@ -40,6 +40,7 @@ import {
 } from './session';
 import { loadClinicConfig, formatInClinicTimezone } from '../config';
 import { formatCalendarLinksForWhatsApp } from '../calendar';
+import { createWhatsAppService } from '../whatsapp-service';
 
 /** Maximum tool-calling round trips per inbound message. */
 const MAX_ROUNDS = 6;
@@ -229,6 +230,8 @@ export async function runAgentTurn(
   let handoffReason: string | undefined;
   let lastMutationAppointment: DentalAppointment | undefined;
 
+  const waService = createWhatsAppService(db, config.demo_mode);
+
   const toolCtx: ToolExecutionContext = {
     db,
     accountId,
@@ -237,6 +240,8 @@ export async function runAgentTurn(
     patientId,
     config,
     conversationId,
+    waMessageId,
+    waService,
   };
 
   try {

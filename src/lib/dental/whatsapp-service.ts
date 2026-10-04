@@ -55,6 +55,15 @@ export interface DentalWhatsAppService {
       rows: Array<{ id: string; title: string; description?: string }>;
     }>;
   }): Promise<SendResult>;
+
+  sendReaction(params: {
+    accountId: string;
+    phone: string;
+    /** Meta message_id of the message to react to. */
+    targetMessageId: string;
+    /** Single emoji (e.g. "👍"). */
+    emoji: string;
+  }): Promise<SendResult>;
 }
 
 // -------------------------------------------------------
@@ -168,6 +177,31 @@ export class MockWhatsAppService implements DentalWhatsAppService {
     });
 
     return { messageId: mockId, messageText: params.body };
+  }
+
+  async sendReaction(params: {
+    accountId: string;
+    phone: string;
+    targetMessageId: string;
+    emoji: string;
+  }): Promise<SendResult> {
+    const mockId = `mock_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    console.log('[dental:mock] 📱 WhatsApp Reaction:');
+    console.log(`  To: ${params.phone}`);
+    console.log(`  Target: ${params.targetMessageId}`);
+    console.log(`  Emoji: ${params.emoji}`);
+
+    await this.db.from('dental_message_log').insert({
+      account_id: params.accountId,
+      direction: 'outbound',
+      message_type: 'text',
+      content: `[Reaction ${params.emoji} on ${params.targetMessageId}]`,
+      whatsapp_message_id: mockId,
+      mock_mode: true,
+    });
+
+    return { messageId: mockId, messageText: params.emoji };
   }
 }
 
@@ -401,6 +435,39 @@ export class RealWhatsAppService implements DentalWhatsAppService {
       .eq('id', resolved.conversationId);
 
     return { messageId: result.messageId, messageText: params.body };
+  }
+
+  async sendReaction(params: {
+    accountId: string;
+    phone: string;
+    targetMessageId: string;
+    emoji: string;
+  }): Promise<SendResult> {
+    const { sendReactionMessage } = await import('@/lib/whatsapp/meta-api');
+    const { decrypt } = await import('@/lib/whatsapp/encryption');
+
+    const { data: config } = await this.db
+      .from('whatsapp_config')
+      .select('*')
+      .eq('account_id', params.accountId)
+      .limit(1)
+      .single();
+
+    if (!config) {
+      throw new Error('WhatsApp not configured for this account');
+    }
+
+    const accessToken = decrypt(config.access_token);
+
+    const result = await sendReactionMessage({
+      phoneNumberId: config.phone_number_id,
+      accessToken,
+      to: params.phone,
+      targetMessageId: params.targetMessageId,
+      emoji: params.emoji,
+    });
+
+    return { messageId: result.messageId, messageText: params.emoji };
   }
 }
 
