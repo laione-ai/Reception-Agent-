@@ -168,8 +168,8 @@ import type { ToolExecutionContext } from '../tools'
 // -------------------------------------------------------
 
 describe('DENTAL_TOOLS', () => {
-  it('defines exactly 8 tools', () => {
-    expect(DENTAL_TOOLS).toHaveLength(8)
+  it('defines exactly 9 tools', () => {
+    expect(DENTAL_TOOLS).toHaveLength(9)
   })
 
   it('all tools have name, description, and parameters', () => {
@@ -222,6 +222,8 @@ describe('executeTool', () => {
       patientId: 'pat-1',
       config: h.config as ToolExecutionContext['config'],
       conversationId: 'conv-1',
+      waMessageId: 'wamid.test',
+      waService: { sendTextMessage: vi.fn(), sendInteractiveButtons: vi.fn(), sendInteractiveList: vi.fn(), sendReaction: vi.fn() } as unknown as ToolExecutionContext['waService'],
     }
   })
 

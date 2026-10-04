@@ -12,6 +12,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ToolDefinition, ToolResult, ToolCall } from './types';
+import type { DentalWhatsAppService } from '../whatsapp-service';
 import type { DentalClinicConfig, DentalAppointment } from '../types';
 import {
   createAppointment,
@@ -164,6 +165,21 @@ export const DENTAL_TOOLS: ToolDefinition[] = [
       required: ['reason'],
     },
   },
+  {
+    name: 'react_to_message',
+    description:
+      'React to the patient\'s current message with an emoji. Use sparingly for quick acknowledgments (e.g. 👍 when starting to process a request). A failed reaction never blocks the turn.',
+    parameters: {
+      type: 'object',
+      properties: {
+        emoji: {
+          type: 'string',
+          description: 'A single emoji to react with (e.g. "👍", "✅", "🦷")',
+        },
+      },
+      required: ['emoji'],
+    },
+  },
 ];
 
 // -------------------------------------------------------
@@ -178,6 +194,10 @@ export interface ToolExecutionContext {
   patientId: string | null;
   config: DentalClinicConfig;
   conversationId: string;
+  /** Meta message_id of the current inbound message (for react_to_message). */
+  waMessageId: string;
+  /** WhatsApp service instance for sending reactions. */
+  waService: DentalWhatsAppService;
 }
 
 // -------------------------------------------------------
@@ -643,6 +663,37 @@ export async function executeTool(
           },
           handoff: true,
           handoffReason: reason,
+        };
+      }
+
+      // ====================================================
+      // react_to_message
+      // ====================================================
+      case 'react_to_message': {
+        const emoji = args.emoji as string;
+        if (!emoji) {
+          return errorResult(toolCall, 'emoji is required');
+        }
+
+        try {
+          await ctx.waService.sendReaction({
+            accountId,
+            phone,
+            targetMessageId: ctx.waMessageId,
+            emoji,
+          });
+        } catch (err) {
+          // A failed reaction send should never block or fail the turn —
+          // reactions are a nice-to-have, not the point of the interaction.
+          console.warn('[dental agent] react_to_message failed (non-blocking):', err);
+        }
+
+        return {
+          result: {
+            tool_call_id: toolCall.id,
+            name: toolCall.name,
+            content: JSON.stringify({ success: true, emoji }),
+          },
         };
       }
 
