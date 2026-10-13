@@ -44,6 +44,32 @@ interface ChatResponse {
 const errMsg = (err: unknown) =>
   err instanceof Error ? err.message : String(err)
 
+/**
+ * Best-effort read of a previously persisted voice note from the private
+ * inbound-media bucket. Returns null on a miss OR on any storage failure
+ * (network error, bucket not provisioned yet) so the caller falls back to
+ * Meta instead of failing the whole transcription attempt. Never throws.
+ */
+async function readStoredAudio(
+  db: SupabaseClient,
+  accountId: string,
+  mediaId: string,
+): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  try {
+    const { data, error } = await db.storage
+      .from('inbound-media')
+      .download(inboundMediaPath(accountId, mediaId))
+    if (error || !data) return null
+    return {
+      buffer: Buffer.from(await data.arrayBuffer()),
+      mimeType: data.type || 'audio/ogg',
+    }
+  } catch (err) {
+    console.warn('[transcribe] storage read failed, falling back to Meta:', errMsg(err))
+    return null
+  }
+}
+
 /** Download a WhatsApp voice note from Meta and transcribe it. Never throws. */
 export async function transcribeVoiceNote(args: {
   db: SupabaseClient
@@ -70,30 +96,20 @@ export async function transcribeVoiceNote(args: {
     // Media persisted at webhook receipt (or healed on read) is
     // already here. Reading from storage avoids re-downloading from
     // Meta (whose download URL expires after 5 minutes), which means
-    // transcription retries no longer hit Meta at all.
-    let buffer: Buffer
-    let mimeType: string
-    const storagePath = inboundMediaPath(accountId, mediaId)
-    const { data: stored, error: storageErr } = await db.storage
-      .from('inbound-media')
-      .download(storagePath)
-
-    if (!storageErr && stored) {
-      // Read from storage — fast, reliable, no Meta dependency.
-      const ab = await stored.arrayBuffer()
-      buffer = Buffer.from(ab)
-      mimeType = stored.type || 'audio/ogg'
-    } else {
+    // transcription retries no longer hit Meta at all. The storage
+    // read is best-effort: any miss OR failure falls through to Meta.
+    let audio = await readStoredAudio(db, accountId, mediaId)
+    if (!audio) {
       // Fall back to Meta (pre-fix messages still in 7-day window).
       try {
         const media = await getMediaUrl({ mediaId, accessToken })
         const dl = await downloadMedia({ downloadUrl: media.url, accessToken })
-        buffer = dl.buffer
-        mimeType = media.mimeType
+        audio = { buffer: dl.buffer, mimeType: media.mimeType }
       } catch (err) {
         return { status: 'failed', error: `Media download: ${errMsg(err)}` }
       }
     }
+    const { buffer, mimeType } = audio
 
     if (buffer.length > MAX_BYTES) {
       return { status: 'skipped', reason: `audio too large (${buffer.length} bytes)` }

@@ -11,6 +11,7 @@ vi.mock('@/lib/whatsapp/meta-api', () => ({
 import { loadAiConfig } from './config'
 import { downloadMedia, getMediaUrl } from '@/lib/whatsapp/meta-api'
 import { transcribeVoiceNote } from './transcribe'
+import { inboundMediaPath } from '@/lib/whatsapp/persist-inbound-media'
 import { OPENAI_URL } from './providers/openai'
 
 const loadAiConfigMock = vi.mocked(loadAiConfig)
@@ -40,13 +41,34 @@ function media(mimeType = 'audio/ogg; codecs=opus', bytes = 10) {
   })
 }
 
-const args = {
-  db: {} as SupabaseClient,
-  accountId: 'acc-1',
-  mediaId: 'media-1',
-  accessToken: 'wa-token',
-  timeoutMs: 5000,
+/**
+ * Minimal stand-in for the Supabase storage API that transcribeVoiceNote
+ * reads from. By default the object is NOT in the bucket (a miss), which
+ * exercises the Meta fallback. Pass `stored` for a storage hit, or
+ * `throws` to simulate a storage outage.
+ */
+function makeDb(opts: { stored?: Blob; throws?: boolean } = {}) {
+  const download = vi.fn(async () => {
+    if (opts.throws) throw new Error('storage down')
+    return opts.stored
+      ? { data: opts.stored, error: null }
+      : { data: null, error: { message: 'Object not found' } }
+  })
+  const from = vi.fn(() => ({ download }))
+  return { db: { storage: { from } } as unknown as SupabaseClient, from, download }
 }
+
+function makeArgs(db: SupabaseClient = makeDb().db) {
+  return {
+    db,
+    accountId: 'acc-1',
+    mediaId: 'media-1',
+    accessToken: 'wa-token',
+    timeoutMs: 5000,
+  }
+}
+
+let args = makeArgs()
 
 let fetchMock: ReturnType<typeof vi.fn>
 
@@ -64,6 +86,7 @@ beforeEach(() => {
   vi.stubEnv('AI_TRANSCRIPTION_MODEL', '')
   loadAiConfigMock.mockResolvedValue(config())
   media()
+  args = makeArgs()
 })
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -132,5 +155,36 @@ describe('transcribeVoiceNote', () => {
     const result = await transcribeVoiceNote(args)
     expect(result).toMatchObject({ status: 'failed', error: expect.stringContaining('404') })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+  it('reads persisted audio from storage first and never calls Meta', async () => {
+    const stored = new Blob([Buffer.alloc(10)], { type: 'audio/ogg' })
+    const { db, from, download } = makeDb({ stored })
+    fetchMock.mockResolvedValue(chatResponse('from storage'))
+
+    const result = await transcribeVoiceNote(makeArgs(db))
+
+    expect(result).toEqual({ status: 'done', transcript: 'from storage' })
+    expect(from).toHaveBeenCalledWith('inbound-media')
+    expect(download).toHaveBeenCalledWith(inboundMediaPath('acc-1', 'media-1'))
+    expect(getMediaUrlMock).not.toHaveBeenCalled()
+    expect(downloadMediaMock).not.toHaveBeenCalled()
+    const audio = JSON.parse(fetchMock.mock.calls[0][1].body).messages[0].content[1]
+    expect(audio.input_audio.data).toBe(Buffer.alloc(10).toString('base64'))
+  })
+
+  it('falls back to Meta when the object is not in storage', async () => {
+    fetchMock.mockResolvedValue(chatResponse('from meta'))
+    const result = await transcribeVoiceNote(args)
+    expect(result).toEqual({ status: 'done', transcript: 'from meta' })
+    expect(getMediaUrlMock).toHaveBeenCalledTimes(1)
+    expect(downloadMediaMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to Meta (not a failure) when the storage read throws', async () => {
+    const { db } = makeDb({ throws: true })
+    fetchMock.mockResolvedValue(chatResponse('recovered'))
+    const result = await transcribeVoiceNote(makeArgs(db))
+    expect(result).toEqual({ status: 'done', transcript: 'recovered' })
+    expect(getMediaUrlMock).toHaveBeenCalledTimes(1)
   })
 })
