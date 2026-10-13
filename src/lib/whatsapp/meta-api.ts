@@ -1002,10 +1002,14 @@ export interface GetMediaUrlArgs {
 /**
  * Resolve a media ID to Meta's (short-lived, authenticated) CDN URL
  * plus the MIME type. Step one of the media-proxy flow.
+ *
+ * `fileSize` is included when Meta returns `file_size` (present on
+ * webhook-delivered media). Callers that don't need it can ignore
+ * the field — backward compatible.
  */
 export async function getMediaUrl(
   args: GetMediaUrlArgs
-): Promise<{ url: string; mimeType: string }> {
+): Promise<{ url: string; mimeType: string; fileSize?: number }> {
   const { mediaId, accessToken } = args
   const response = await fetch(`${META_API_BASE}/${mediaId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -1015,7 +1019,11 @@ export async function getMediaUrl(
   }
   const data = await response.json()
   if (!data.url) throw new Error('Media URL not found in Meta response')
-  return { url: data.url, mimeType: data.mime_type || 'application/octet-stream' }
+  return {
+    url: data.url,
+    mimeType: data.mime_type || 'application/octet-stream',
+    fileSize: typeof data.file_size === 'number' ? data.file_size : undefined,
+  }
 }
 
 export interface DownloadMediaArgs {

@@ -216,6 +216,7 @@
       "video": "Video",
       "audio": "Audio",
       "unavailable": "{label} unavailable",
+      "expired": "{label} — attachment expired (WhatsApp only keeps media for 7 days)",
       "document": "Document",
       "locationShared": "Location shared",
       "template": "Template",

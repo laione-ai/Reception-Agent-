@@ -215,6 +215,7 @@
       "video": "동영상",
       "audio": "오디오",
       "unavailable": "{label}을(를) 사용할 수 없습니다",
+      "expired": "{label} — 첨부파일이 만료되었습니다 (WhatsApp은 미디어를 7일간만 보관합니다)",
       "document": "문서",
       "locationShared": "위치 공유됨",
       "template": "템플릿",

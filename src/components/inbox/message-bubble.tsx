@@ -56,9 +56,41 @@ function MediaUnavailable({ label, t }: { label: string, t: ReturnType<typeof us
   );
 }
 
-function MediaImage({ url, alt }: { url: string; alt: string }) {
+/**
+ * Check whether a proxy media URL has expired (410 from the route).
+ * Used by audio, video, and document cases so expired media shows
+ * a clear label instead of failing silently.
+ */
+function useMediaExpired(url: string | null | undefined): boolean {
+  const [expired, setExpired] = useState(false);
+
+  useEffect(() => {
+    if (!url || !url.startsWith("/api/whatsapp/media/")) return;
+    // HEAD-like check — abort as soon as we see the status.
+    let cancelled = false;
+    fetch(url, { method: "GET" }).then((res) => {
+      if (!cancelled && res.status === 410) setExpired(true);
+      // Revoke any blob created by the browser for this fetch.
+    }).catch(() => { /* swallow */ });
+    return () => { cancelled = true; };
+  }, [url]);
+
+  return expired;
+}
+
+function MediaExpired({ label, t }: { label: string; t: ReturnType<typeof useTranslations> }) {
+  return (
+    <div className="flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+      <ImageOff className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <span>{t("expired", { label })}</span>
+    </div>
+  );
+}
+
+function MediaImage({ url, alt, t }: { url: string; alt: string; t: ReturnType<typeof useTranslations> }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  const [expired, setExpired] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const loadImage = useCallback(async () => {
@@ -68,6 +100,11 @@ function MediaImage({ url, alt }: { url: string; alt: string }) {
     if (url.startsWith("/api/whatsapp/media/")) {
       try {
         const res = await fetch(url);
+        if (res.status === 410) {
+          setExpired(true);
+          setLoading(false);
+          return;
+        }
         if (!res.ok) throw new Error("Failed to load media");
         const blob = await res.blob();
         const blobUrl = URL.createObjectURL(blob);
@@ -92,6 +129,10 @@ function MediaImage({ url, alt }: { url: string; alt: string }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadImage]);
+
+  if (expired) {
+    return <MediaExpired label={t("photo")} t={t} />;
+  }
 
   if (error) {
     return (
@@ -119,6 +160,87 @@ function MediaImage({ url, alt }: { url: string; alt: string }) {
   );
 }
 
+function VideoContent({ message, t }: { message: Message; t: ReturnType<typeof useTranslations> }) {
+  const expired = useMediaExpired(message.media_url);
+
+  if (!message.media_url) {
+    return <MediaUnavailable label={t("video")} t={t} />;
+  }
+  if (expired) {
+    return <MediaExpired label={t("video")} t={t} />;
+  }
+  return (
+    <div>
+      <video
+        src={message.media_url}
+        controls
+        className="max-h-64 max-w-60 rounded-lg"
+      />
+      {message.content_text && (
+        <p className="mt-1 whitespace-pre-wrap break-words text-sm">
+          {message.content_text}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function AudioContent({ message, t }: { message: Message; t: ReturnType<typeof useTranslations> }) {
+  const expired = useMediaExpired(message.media_url);
+
+  if (!message.media_url) {
+    return <MediaUnavailable label={t("audio")} t={t} />;
+  }
+  if (expired) {
+    return (
+      <div>
+        <MediaExpired label={t("audio")} t={t} />
+        {/* Voice-note transcript (filled in by the webhook). */}
+        {message.content_text && (
+          <p className="mt-1 whitespace-pre-wrap break-words text-xs italic opacity-80">
+            {message.content_text}
+          </p>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div>
+      <audio src={message.media_url} controls className="max-w-60" />
+      {/* Voice-note transcript (filled in by the webhook). */}
+      {message.content_text && (
+        <p className="mt-1 whitespace-pre-wrap break-words text-xs italic opacity-80">
+          {message.content_text}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function DocumentContent({ message, t }: { message: Message; t: ReturnType<typeof useTranslations> }) {
+  const expired = useMediaExpired(message.media_url);
+
+  if (!message.media_url) {
+    return <MediaUnavailable label={message.content_text || t("document")} t={t} />;
+  }
+  if (expired) {
+    return <MediaExpired label={message.content_text || t("document")} t={t} />;
+  }
+  return (
+    <a
+      href={message.media_url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2 text-sm hover:bg-muted"
+    >
+      <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
+      <span className="truncate">
+        {message.content_text || t("document")}
+      </span>
+    </a>
+  );
+}
+
 function MessageContent({ message, t }: { message: Message, t: ReturnType<typeof useTranslations> }) {
   switch (message.content_type) {
     case "text":
@@ -132,7 +254,7 @@ function MessageContent({ message, t }: { message: Message, t: ReturnType<typeof
       return (
         <div>
           {message.media_url ? (
-            <MediaImage url={message.media_url} alt="Shared image" />
+            <MediaImage url={message.media_url} alt="Shared image" t={t} />
           ) : (
             <MediaUnavailable label={t("photo")} t={t} />
           )}
@@ -145,59 +267,13 @@ function MessageContent({ message, t }: { message: Message, t: ReturnType<typeof
       );
 
     case "video":
-      return (
-        <div>
-          {message.media_url ? (
-            <video
-              src={message.media_url}
-              controls
-              className="max-h-64 max-w-60 rounded-lg"
-            />
-          ) : (
-            <MediaUnavailable label={t("video")} t={t} />
-          )}
-          {message.content_text && (
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm">
-              {message.content_text}
-            </p>
-          )}
-        </div>
-      );
+      return <VideoContent message={message} t={t} />;
 
     case "audio":
-      return (
-        <div>
-          {message.media_url ? (
-            <audio src={message.media_url} controls className="max-w-60" />
-          ) : (
-            <MediaUnavailable label={t("audio")} t={t} />
-          )}
-          {/* Voice-note transcript (filled in by the webhook). */}
-          {message.content_text && (
-            <p className="mt-1 whitespace-pre-wrap break-words text-xs italic opacity-80">
-              {message.content_text}
-            </p>
-          )}
-        </div>
-      );
+      return <AudioContent message={message} t={t} />;
 
     case "document":
-      if (!message.media_url) {
-        return <MediaUnavailable label={message.content_text || t("document")} t={t} />;
-      }
-      return (
-        <a
-          href={message.media_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2 text-sm hover:bg-muted"
-        >
-          <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
-          <span className="truncate">
-            {message.content_text || t("document")}
-          </span>
-        </a>
-      );
+      return <DocumentContent message={message} t={t} />;
 
     case "template":
       return (

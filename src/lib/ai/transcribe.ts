@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { downloadMedia, getMediaUrl } from '@/lib/whatsapp/meta-api'
+import { inboundMediaPath } from '@/lib/whatsapp/persist-inbound-media'
 import { loadAiConfig } from './config'
 import { OPENAI_URL } from './providers/openai'
 import { providerHttpError, toNetworkError } from './providers/shared'
@@ -65,15 +66,33 @@ export async function transcribeVoiceNote(args: {
       return { status: 'skipped', reason: `provider ${config.provider} cannot transcribe` }
     }
 
+    // ── Storage-first: try the private inbound-media bucket ────
+    // Media persisted at webhook receipt (or healed on read) is
+    // already here. Reading from storage avoids re-downloading from
+    // Meta (whose download URL expires after 5 minutes), which means
+    // transcription retries no longer hit Meta at all.
     let buffer: Buffer
     let mimeType: string
-    try {
-      const media = await getMediaUrl({ mediaId, accessToken })
-      const dl = await downloadMedia({ downloadUrl: media.url, accessToken })
-      buffer = dl.buffer
-      mimeType = media.mimeType
-    } catch (err) {
-      return { status: 'failed', error: `Media download: ${errMsg(err)}` }
+    const storagePath = inboundMediaPath(accountId, mediaId)
+    const { data: stored, error: storageErr } = await db.storage
+      .from('inbound-media')
+      .download(storagePath)
+
+    if (!storageErr && stored) {
+      // Read from storage — fast, reliable, no Meta dependency.
+      const ab = await stored.arrayBuffer()
+      buffer = Buffer.from(ab)
+      mimeType = stored.type || 'audio/ogg'
+    } else {
+      // Fall back to Meta (pre-fix messages still in 7-day window).
+      try {
+        const media = await getMediaUrl({ mediaId, accessToken })
+        const dl = await downloadMedia({ downloadUrl: media.url, accessToken })
+        buffer = dl.buffer
+        mimeType = media.mimeType
+      } catch (err) {
+        return { status: 'failed', error: `Media download: ${errMsg(err)}` }
+      }
     }
 
     if (buffer.length > MAX_BYTES) {
