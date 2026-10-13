@@ -42,8 +42,8 @@ function extractMediaId(proxyUrl: string): string | null {
 }
 
 export async function GET(request: Request) {
-  // ── Auth ──────────────────────────────────────────────────
-  const expected = process.env.AUTOMATION_CRON_SECRET
+  // Use DENTAL_CRON_SECRET or fall back to AUTOMATION_CRON_SECRET
+  const expected = process.env.DENTAL_CRON_SECRET ?? process.env.AUTOMATION_CRON_SECRET
   if (!expected) {
     return NextResponse.json({ error: 'cron not configured' }, { status: 503 })
   }
