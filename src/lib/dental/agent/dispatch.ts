@@ -20,6 +20,7 @@
 import { supabaseAdmin } from '@/lib/ai/admin-client';
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit';
 import { runAgentTurn } from './engine';
+import { refreshConversationSummary } from './memory';
 import type { AgentContext } from './types';
 
 export interface DispatchArgs {
@@ -155,6 +156,13 @@ export async function dispatchInboundToDentalAgent(
         content: result.reply,
         mock_mode: clinicConfig.demo_mode,
       });
+
+      // Fold older messages into the rolling summary now that the patient
+      // has their reply. We're already inside the webhook route's after(),
+      // so awaiting doesn't delay the response to Meta; it never throws.
+      if (result.ai) {
+        await refreshConversationSummary(db, conversationId, result.ai);
+      }
     }
 
     return { consumed: true, isDentalAccount: true };
